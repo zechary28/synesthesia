@@ -1,6 +1,7 @@
 *.exe
 *.dsym
 synesthesia
+output.txt
 
 *.code-workspace
 .vscode/
