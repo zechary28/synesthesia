@@ -84,7 +84,8 @@ uint32_t readVlqDt(const std::vector<uint8_t>& buf, size_t& pos)
     return value;
 }
 
-bool readMetaEvent(const std::vector<uint8_t>& buf, size_t& pos)
+bool readMetaEvent(const std::vector<uint8_t>& buf, size_t& pos,
+                   uint32_t& tempo)
 {
     pos += 1; // skip 0xFF
     uint8_t type = read_u8(buf, pos);
@@ -92,8 +93,13 @@ bool readMetaEvent(const std::vector<uint8_t>& buf, size_t& pos)
 
     if (type == 0x51 && len == 3)
     {
-        // uint32_t tempo = 
+        tempo = (uint32_t(buf[pos])   << 16) |
+                (uint32_t(buf[pos+1]) << 8)  |
+                 uint32_t(buf[pos+2]);
+        pos += len;      // ← must advance past data bytes
+        printf("reading tempo: %zu", tempo);
     }
+
     pos += len; // skip data bytes
     return 1;
 }
@@ -121,6 +127,7 @@ bool readChannelEvent(const std::vector<uint8_t>& buf, size_t& pos, uint8_t runn
 }
 
 bool readMidiEvent(const std::vector<uint8_t>& buf, size_t& pos, uint8_t& running_status, 
+                   uint32_t& tempo,
                    uint32_t& dt, uint8_t& status, uint8_t& data1, uint8_t& data2)
 {
     dt = readVlqDt(buf, pos);
@@ -130,7 +137,7 @@ bool readMidiEvent(const std::vector<uint8_t>& buf, size_t& pos, uint8_t& runnin
     {
         if (byte == 0xFF) // meta event
         {
-            readMetaEvent(buf, pos);
+            readMetaEvent(buf, pos, tempo);
             return false;
         }
         else if (byte == 0xF0) // sysex event
@@ -151,7 +158,8 @@ bool readMidiEvent(const std::vector<uint8_t>& buf, size_t& pos, uint8_t& runnin
     return true;
 }
 
-int readMidiTrack(const std::vector<uint8_t>& buf, size_t& pos, std::vector<MidiEvent>& events, uint16_t trackIndex, uint16_t format)
+int readMidiTrack(const std::vector<uint8_t>& buf, size_t& pos, std::vector<MidiEvent>& events, uint16_t trackIndex, uint16_t format,
+                  uint32_t& tempo)
 {
     std::string tag = read_tag(buf, pos);
     if (tag != "MTrk") return 1;
@@ -163,7 +171,7 @@ int readMidiTrack(const std::vector<uint8_t>& buf, size_t& pos, std::vector<Midi
     while (pos < track_end) 
     {
         uint32_t dt; uint8_t status, data1, data2, voice;
-        bool isChannelEvent(readMidiEvent(buf, pos, running_status, dt, status, data1, data2));
+        bool isChannelEvent(readMidiEvent(buf, pos, running_status, tempo, dt, status, data1, data2));
         absoluteTick += dt;
         printf("rawDelta=%u absoluteTick=%u status=%02X\n", dt, absoluteTick, status);
         if (isChannelEvent) 
@@ -243,13 +251,32 @@ std::vector<Note> buildNoteList(std::vector<MidiEvent> events, uint32_t tempo, u
     return notes;
 }
 
+const Color VOICE_COLORS[16] = {
+    {235, 235, 235, 255},   // 12 white
+    {235, 64,  52,  255},   // 0  red
+    {52,  235, 94,  255},   // 4  green
+    {52,  92,  235, 255},   // 7  blue
+    {235, 211, 52,  255},   // 2  yellow
+    {235, 140, 52,  255},   // 1  orange
+    {52,  235, 195, 255},   // 5  teal
+    {52,  174, 235, 255},   // 6  sky blue
+    {130, 235, 52,  255},   // 3  lime
+    {112, 52,  235, 255},   // 8  indigo
+    {189, 52,  235, 255},   // 9  violet
+    {235, 52,  174, 255},   // 10 pink
+    {235, 52,  92,  255},   // 11 rose
+    {180, 180, 180, 255},   // 13 light grey
+    {100, 100, 100, 255},   // 14 dark grey
+    {255, 215, 0,   255},   // 15 gold
+};
+
 void drawNote(Vector2 center, Note note, float gap)
 {
     uint8_t numPitches = 12;
     float angleOffset = -90.0f;
     float sectorAngle = 360.0f / numPitches;
-    float ringWidth = 10.0f;
-    float baseRadius = 50.0f;
+    float ringWidth = 20.0f;
+    float baseRadius = 30.0f;
 
     uint8_t octave = note.pitch / numPitches;
     uint8_t pitchClass = note.pitch % numPitches;
@@ -258,7 +285,8 @@ void drawNote(Vector2 center, Note note, float gap)
     float startAngle = (pitchClass * sectorAngle) + angleOffset + (gap / 2);
     float endAngle = ((pitchClass + 1) * sectorAngle) + angleOffset - (gap / 2);
 
-    DrawRing(center, innerRadius, outerRadius, startAngle, endAngle, 8, RED);
+    Color noteColor = VOICE_COLORS[note.voice % 16];
+    DrawRing(center, innerRadius, outerRadius, startAngle, endAngle, 8, noteColor);
 }
 
 int main()
@@ -294,15 +322,19 @@ int main()
 
     std::vector<MidiEvent> events;
 
+    uint32_t tempo = 500000;
+
     // READ TRACKS
     for (uint16_t trackIndex = 0; trackIndex < track_count; trackIndex++)
     {
         printf("Track %d", trackIndex);
-        readMidiTrack(buffer, bufferPointer, events, trackIndex, format);
+        readMidiTrack(buffer, bufferPointer, events, trackIndex, format, tempo);
         printf("bufferPointer=%zu\n", bufferPointer);
         for (MidiEvent event : events)
             printf("dt: %zu, status: %zu, data1: %zu, data2: %zu, voice: %zu \n", event.dt, event.status, event.data1, event.data2, event.voice);
     }
+
+    printf("tempo read: %zu", tempo);
 
     // sort events vector
     std::sort(events.begin(), events.end(), [](const MidiEvent& a, const MidiEvent& b)
@@ -317,7 +349,6 @@ int main()
         return commandA < commandB;  // 0x80 < 0x90 ✓
     });
 
-    uint32_t tempo = 500000;
     std::vector<Note> notes = buildNoteList(events, tempo, division);
 
     for (Note note : notes)
@@ -364,7 +395,7 @@ int main()
         printf("drawing notes at %f\n", timer);
         for (const auto& entry : activeNotes)
         {
-            drawNote(center, entry.second, 2.0f);
+            drawNote(center, entry.second, 4.0f);
             std::cout << "startTime=" << entry.second.startTime
                 << " endTime=" << entry.second.endTime
                 << " voice=" << static_cast<int>(entry.second.voice)
