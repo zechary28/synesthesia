@@ -270,7 +270,24 @@ const Color VOICE_COLORS[16] = {
     {255, 215, 0,   255},   // 15 gold
 };
 
-void drawNote(Vector2 center, Note note, float gap)
+float computeOpacity(const Note& note, float currentTime)
+{
+    float duration  = note.endTime - note.startTime;
+    float age       = currentTime - note.startTime;
+    float position  = age / duration;   // 0.0 → 1.0
+
+    const float FADE_IN  = 0.5f;        // first 10% of note
+    const float FADE_OUT = 0.5f;        // last 20% of note
+
+    if (position < FADE_IN)
+        return position / FADE_IN;                      // fade in
+    else if (position > (1.0f - FADE_OUT))
+        return (1.0f - position) / FADE_OUT;            // fade out
+    else
+        return 1.0f;                                    // full opacity
+}
+
+void drawNote(Vector2 center, Note note, float currentTime, float gap)
 {
     uint8_t numPitches = 12;
     float angleOffset = -90.0f;
@@ -285,7 +302,13 @@ void drawNote(Vector2 center, Note note, float gap)
     float startAngle = (pitchClass * sectorAngle) + angleOffset + (gap / 2);
     float endAngle = ((pitchClass + 1) * sectorAngle) + angleOffset - (gap / 2);
 
-    Color noteColor = VOICE_COLORS[note.voice % 16];
+    float opacity = computeOpacity(note, currentTime);
+    Color base  = VOICE_COLORS[note.voice % 16];
+    Color noteColor = {
+        base.r, base.g, base.b,
+        static_cast<uint8_t>(opacity * 255)
+    };
+
     DrawRing(center, innerRadius, outerRadius, startAngle, endAngle, 8, noteColor);
 }
 
@@ -395,7 +418,7 @@ int main()
         printf("drawing notes at %f\n", timer);
         for (const auto& entry : activeNotes)
         {
-            drawNote(center, entry.second, 4.0f);
+            drawNote(center, entry.second, timer, 4.0f);
             std::cout << "startTime=" << entry.second.startTime
                 << " endTime=" << entry.second.endTime
                 << " voice=" << static_cast<int>(entry.second.voice)
