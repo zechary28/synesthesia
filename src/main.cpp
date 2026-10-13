@@ -88,6 +88,7 @@ uint32_t readVlqDt(const std::vector<uint8_t>& buf, size_t& pos)
 bool readMetaEvent(const std::vector<uint8_t>& buf, size_t& pos,
                    uint32_t& tempo)
 {
+    printf("readMetaEvent entry pos=%zu\n", pos);
     pos += 1; // skip 0xFF
     uint8_t type = read_u8(buf, pos);
     uint32_t len = readVlqDt(buf, pos);
@@ -97,11 +98,14 @@ bool readMetaEvent(const std::vector<uint8_t>& buf, size_t& pos,
         tempo = (uint32_t(buf[pos])   << 16) |
                 (uint32_t(buf[pos+1]) << 8)  |
                  uint32_t(buf[pos+2]);
-        pos += len;      // ← must advance past data bytes
+        //pos += len;      // ← must advance past data bytes
         printf("reading tempo: %u", tempo);
     }
 
+    printf("type=%02X len=%u pos=%zu\n", type, len, pos);
+
     pos += len; // skip data bytes
+    printf("readMetaEvent exit pos=%zu\n", pos);
     return 1;
 }
 
@@ -165,14 +169,22 @@ int readMidiTrack(const std::vector<uint8_t>& buf, size_t& pos, std::vector<Midi
     std::string tag = read_tag(buf, pos);
     if (tag != "MTrk") return 1;
     uint32_t len = read_u32_be(buf, pos);
+    printf("track len=%u track_end=%zu buf_size=%zu\n", 
+           len, pos + len, buf.size());
     size_t track_end = pos + static_cast<size_t>(len);
     uint8_t running_status = 0x00;
 
     uint32_t absoluteTick = 0;
     while (pos < track_end) 
     {
+        // size_t pos_before = pos;
+
         uint32_t dt; uint8_t status, data1, data2, voice;
         bool isChannelEvent(readMidiEvent(buf, pos, running_status, tempo, dt, status, data1, data2));
+
+        // printf("pos before=%zu pos after=%zu bytes consumed=%zu\n",
+        //    pos_before, pos, pos - pos_before);
+
         absoluteTick += dt;
         if (isChannelEvent) 
         {
@@ -180,6 +192,7 @@ int readMidiTrack(const std::vector<uint8_t>& buf, size_t& pos, std::vector<Midi
             events.emplace_back(absoluteTick, status, data1, data2, voice);
         }
     }
+    printf("loop exited: pos=%zu track_end=%zu\n", pos, track_end);
     return 0;
 }
 
@@ -292,13 +305,14 @@ void drawNote(Vector2 center, Note note, float currentTime, float gap)
     uint8_t numPitches = 12;
     float angleOffset = -90.0f;
     float sectorAngle = 360.0f / numPitches;
-    float ringWidth = 20.0f;
-    float baseRadius = 30.0f;
+    float ringWidth = 40.0f;
+    float baseRadius = 0.0f;
+    float radiusGap = 20.0f;
 
     uint8_t octave = note.pitch / numPitches;
     uint8_t pitchClass = note.pitch % numPitches;
-    float innerRadius = baseRadius + (octave * ringWidth) + (gap / 2);
-    float outerRadius = baseRadius + ((octave + 1) * ringWidth) - (gap / 2);
+    float innerRadius = baseRadius + (octave * ringWidth) + (radiusGap / 2);
+    float outerRadius = baseRadius + ((octave + 1) * ringWidth) - (radiusGap / 2);
     float startAngle = (pitchClass * sectorAngle) + angleOffset + (gap / 2);
     float endAngle = ((pitchClass + 1) * sectorAngle) + angleOffset - (gap / 2);
 
@@ -312,12 +326,24 @@ void drawNote(Vector2 center, Note note, float currentTime, float gap)
     DrawRing(center, innerRadius, outerRadius, startAngle, endAngle, 8, noteColor);
 }
 
-int main()
+int main(int argc, char* argv[])
 {   
     // FILE READING
-    std::ifstream file("assets/midi/canon_in_d.mid", std::ios::binary);
-    if (!file) {
-        std::cerr << "Error: could not open MIDI file\n";
+
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage: synesthesia <midi_file>\n");
+        return 1;
+    }
+
+    std::string midiPath = argv[1];
+    printf("loading: %s\n", midiPath.c_str());
+
+    // open file using the path argument
+    std::ifstream file(midiPath, std::ios::binary);
+    if (!file)
+    {
+        fprintf(stderr, "Error: could not open %s\n", midiPath.c_str());
         return 1;
     }
 
@@ -339,7 +365,7 @@ int main()
     int rc = readMidiHeader(buffer, bufferPointer, format, track_count, division);
     if (rc) return 1;
     
-    // printf("format=%u tracks=%u division=%u\n", format, track_count, division);
+    printf("format=%u tracks=%u division=%u\n", format, track_count, division);
 
     std::vector<MidiEvent> events;
 
@@ -348,9 +374,13 @@ int main()
     // READ TRACKS
     for (uint16_t trackIndex = 0; trackIndex < track_count; trackIndex++)
     {
-        // printf("Track %d", trackIndex);
+        printf("Track %d", trackIndex);
+        // printf("expecting MTrk at pos %zu: %02X %02X %02X %02X\n",
+        //     bufferPointer,
+        //     buffer[bufferPointer],   buffer[bufferPointer+1],
+        //     buffer[bufferPointer+2], buffer[bufferPointer+3]);
         readMidiTrack(buffer, bufferPointer, events, trackIndex, format, tempo);
-        // printf("bufferPointer=%zu\n", bufferPointer);
+        printf("bufferPointer=%zu\n", bufferPointer);
         // for (MidiEvent event : events)
         //     printf("dt: %u, status: %02X, data1: %02X, data2: %u, voice: %u\n", event.dt, event.status, event.data1, event.data2, event.voice);
     }
