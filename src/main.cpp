@@ -1,4 +1,5 @@
 #include <raylib.h>
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <functional>
@@ -97,7 +98,7 @@ bool readMetaEvent(const std::vector<uint8_t>& buf, size_t& pos,
                 (uint32_t(buf[pos+1]) << 8)  |
                  uint32_t(buf[pos+2]);
         pos += len;      // ← must advance past data bytes
-        printf("reading tempo: %zu", tempo);
+        printf("reading tempo: %u", tempo);
     }
 
     pos += len; // skip data bytes
@@ -173,7 +174,6 @@ int readMidiTrack(const std::vector<uint8_t>& buf, size_t& pos, std::vector<Midi
         uint32_t dt; uint8_t status, data1, data2, voice;
         bool isChannelEvent(readMidiEvent(buf, pos, running_status, tempo, dt, status, data1, data2));
         absoluteTick += dt;
-        printf("rawDelta=%u absoluteTick=%u status=%02X\n", dt, absoluteTick, status);
         if (isChannelEvent) 
         {
             voice = (format == 1) ? trackIndex : (status & 0x0F); // voice resolution
@@ -336,12 +336,10 @@ int main()
     uint16_t track_count;
     uint16_t division;
 
-    size_t pos_start = bufferPointer; // for debug
-
     int rc = readMidiHeader(buffer, bufferPointer, format, track_count, division);
     if (rc) return 1;
     
-    printf("format=%u tracks=%u division=%u\n", format, track_count, division);
+    // printf("format=%u tracks=%u division=%u\n", format, track_count, division);
 
     std::vector<MidiEvent> events;
 
@@ -350,14 +348,14 @@ int main()
     // READ TRACKS
     for (uint16_t trackIndex = 0; trackIndex < track_count; trackIndex++)
     {
-        printf("Track %d", trackIndex);
+        // printf("Track %d", trackIndex);
         readMidiTrack(buffer, bufferPointer, events, trackIndex, format, tempo);
-        printf("bufferPointer=%zu\n", bufferPointer);
-        for (MidiEvent event : events)
-            printf("dt: %zu, status: %zu, data1: %zu, data2: %zu, voice: %zu \n", event.dt, event.status, event.data1, event.data2, event.voice);
+        // printf("bufferPointer=%zu\n", bufferPointer);
+        // for (MidiEvent event : events)
+        //     printf("dt: %u, status: %02X, data1: %02X, data2: %u, voice: %u\n", event.dt, event.status, event.data1, event.data2, event.voice);
     }
 
-    printf("tempo read: %zu", tempo);
+    // printf("tempo read: %u", tempo);
 
     // sort events vector
     std::sort(events.begin(), events.end(), [](const MidiEvent& a, const MidiEvent& b)
@@ -374,10 +372,10 @@ int main()
 
     std::vector<Note> notes = buildNoteList(events, tempo, division);
 
-    for (Note note : notes)
-    {
-        printf("start: %f, end: %f, voice: %d, pitch: %d \n", note.startTime, note.endTime, note.voice, note.pitch);
-    }
+    // for (Note note : notes)
+    // {
+    //     printf("start: %f, end: %f, voice: %d, pitch: %d \n", note.startTime, note.endTime, note.voice, note.pitch);
+    // }
 
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "synesthesia");
 
