@@ -66,7 +66,7 @@ int readMidiHeader(const std::vector<uint8_t>& buf, size_t& pos, uint16_t& fmt, 
 }
 
 struct MidiEvent {
-    uint32_t dt;
+    uint32_t absoluteTick;
     uint8_t status;
     uint8_t data1;
     uint8_t data2;
@@ -85,8 +85,8 @@ uint32_t readVlqDt(const std::vector<uint8_t>& buf, size_t& pos)
     return value;
 }
 
-bool readMetaEvent(const std::vector<uint8_t>& buf, size_t& pos,
-                   uint32_t& tempo)
+bool readMetaEvent(const std::vector<uint8_t>& buf, size_t& pos, uint32_t& absoluteTick,
+                   std::vector<std::pair<uint32_t, uint32_t>>& tempoHistory)
 {
     printf("readMetaEvent entry pos=%zu\n", pos);
     pos += 1; // skip 0xFF
@@ -95,11 +95,12 @@ bool readMetaEvent(const std::vector<uint8_t>& buf, size_t& pos,
 
     if (type == 0x51 && len == 3)
     {
-        tempo = (uint32_t(buf[pos])   << 16) |
-                (uint32_t(buf[pos+1]) << 8)  |
-                 uint32_t(buf[pos+2]);
-        //pos += len;      // ← must advance past data bytes
-        printf("reading tempo: %u", tempo);
+
+        uint32_t tempo = (uint32_t(buf[pos])   << 16) |
+                         (uint32_t(buf[pos+1]) << 8)  |
+                          uint32_t(buf[pos+2]);
+        tempoHistory.emplace_back(absoluteTick, tempo);
+        // printf("reading tempo: %u at %u \n", tempo, absoluteTick);
     }
 
     printf("type=%02X len=%u pos=%zu\n", type, len, pos);
@@ -131,8 +132,7 @@ bool readChannelEvent(const std::vector<uint8_t>& buf, size_t& pos, uint8_t runn
     return 0;
 }
 
-bool readMidiEvent(const std::vector<uint8_t>& buf, size_t& pos, uint8_t& running_status, 
-                   uint32_t& tempo,
+bool readMidiEvent(const std::vector<uint8_t>& buf, size_t& pos, uint8_t& running_status, uint32_t absoluteTick, std::vector<std::pair<uint32_t, uint32_t>>& tempoHistory,
                    uint32_t& dt, uint8_t& status, uint8_t& data1, uint8_t& data2)
 {
     dt = readVlqDt(buf, pos);
@@ -142,7 +142,8 @@ bool readMidiEvent(const std::vector<uint8_t>& buf, size_t& pos, uint8_t& runnin
     {
         if (byte == 0xFF) // meta event
         {
-            readMetaEvent(buf, pos, tempo);
+            uint32_t eventAbsoluteTick = absoluteTick + dt;
+            readMetaEvent(buf, pos, eventAbsoluteTick, tempoHistory); //////////
             return false;
         }
         else if (byte == 0xF0) // sysex event
@@ -164,7 +165,7 @@ bool readMidiEvent(const std::vector<uint8_t>& buf, size_t& pos, uint8_t& runnin
 }
 
 int readMidiTrack(const std::vector<uint8_t>& buf, size_t& pos, std::vector<MidiEvent>& events, uint16_t trackIndex, uint16_t format,
-                  uint32_t& tempo)
+                  std::vector<std::pair<uint32_t, uint32_t>>& tempoHistory)
 {
     std::string tag = read_tag(buf, pos);
     if (tag != "MTrk") return 1;
@@ -180,7 +181,7 @@ int readMidiTrack(const std::vector<uint8_t>& buf, size_t& pos, std::vector<Midi
         // size_t pos_before = pos;
 
         uint32_t dt; uint8_t status, data1, data2, voice;
-        bool isChannelEvent(readMidiEvent(buf, pos, running_status, tempo, dt, status, data1, data2));
+        bool isChannelEvent = readMidiEvent(buf, pos, running_status, absoluteTick, tempoHistory, dt, status, data1, data2);
 
         // printf("pos before=%zu pos after=%zu bytes consumed=%zu\n",
         //    pos_before, pos, pos - pos_before);
@@ -201,49 +202,84 @@ struct Note {
     uint8_t channel;
     uint8_t pitch;
     uint8_t velocity;
-    float   startTime;
-    float   endTime;
+    double   startTime;
+    double   endTime;
 };
 
-float timeInSeconds(uint32_t ticks, uint32_t tempo, uint16_t division)
+double timeInSeconds(uint32_t ticks, uint32_t tempo, uint16_t division)
 {
-    return ticks * (static_cast<float>(tempo) / division) / 1000000.0f;
+    return ticks * (static_cast<double>(tempo) / division) / 1000000.0f;
 }
 
-std::vector<Note> buildNoteList(std::vector<MidiEvent> events, uint32_t tempo, uint16_t division)
+std::vector<Note> buildNoteList(std::vector<MidiEvent> events, std::vector<std::pair<uint32_t, uint32_t>>& tempoHistory, uint16_t division)
 {
     std::vector<Note> notes;
-    std::map<std::pair<uint8_t, uint8_t>, MidiEvent> unmatchedEvents;
+    std::map<std::pair<uint8_t, uint8_t>, std::pair<MidiEvent, double>> unmatchedEvents;
+    uint32_t tempoIndex = 0;
+    uint32_t tickOfLastTempoChange = 0;
+    uint32_t currentTempo = 500000;
+    double timeOfLastTempoChange = 0.0f;
+
+    if (!tempoHistory.empty())
+    {
+        currentTempo          = tempoHistory[0].second;
+        tickOfLastTempoChange = tempoHistory[0].first;   // usually 0
+    }
 
     for (const MidiEvent& event : events)
     {
+        // poll event and extract fields
         uint8_t voice = event.voice;
         uint8_t command = event.status & 0xF0;
         uint8_t channel = event.status & 0x0F;
         uint8_t pitch = event.data1;
         uint8_t velocity = event.data2;
+
+        // check for and update tempo change
+        uint32_t eventAbsoluteTick = event.absoluteTick;
+        while (!tempoHistory.empty() && tempoIndex < tempoHistory.size() - 1) // within bounds check
+        {
+            auto [tickOfNextTempoChange, nextTempo] = tempoHistory[tempoIndex + 1];
+            if (tickOfNextTempoChange <= eventAbsoluteTick) // event polled is after tempo change
+            {
+                printf("tempo changed from %u to %u\n", currentTempo, nextTempo);
+                timeOfLastTempoChange = timeOfLastTempoChange + timeInSeconds(tickOfNextTempoChange - tickOfLastTempoChange, currentTempo, division);
+                tickOfLastTempoChange = tickOfNextTempoChange;
+                currentTempo = nextTempo;
+                tempoIndex += 1;
+            }
+            else break;
+        }
+
+        // match notes
         if (command == 0x90 && velocity > 0)
         {
-            // new note on event
-            unmatchedEvents.insert({{voice, pitch}, event});
+            // new note-on event: add to pending
+            double timeSinceTempoChange = timeInSeconds(event.absoluteTick - tickOfLastTempoChange, currentTempo, division);
+            double startTime = timeOfLastTempoChange + timeSinceTempoChange;
+            unmatchedEvents.insert({{voice, pitch}, {event, startTime}});
         }
         else if ((command == 0x80 || (command == 0x90 && velocity == 0))
                 && unmatchedEvents.contains({voice, pitch}))
         {
-            // found matched note off event
+            // found matched note-off event: create MidiEvent, add to events vector
             auto key = std::make_pair(voice, pitch);
-            MidiEvent onNoteEvent = unmatchedEvents.at(key);
+            auto noteOntuple = unmatchedEvents.at(key);
+            MidiEvent noteOnEvent = std::get<0>(noteOntuple);
+            double startTime = std::get<1>(noteOntuple);
             unmatchedEvents.erase(key);
+            // printf("found end note\n");
 
-            uint8_t onNoteVelocity = onNoteEvent.data2;
-            float startTime = timeInSeconds(onNoteEvent.dt, tempo, division);
-            float endTime = timeInSeconds(event.dt, tempo, division);
-            notes.emplace_back(voice, channel, pitch, onNoteVelocity, startTime, endTime);
+            uint8_t noteOnVelocity = noteOnEvent.data2;
+            double timeSinceTempoChange = timeInSeconds(event.absoluteTick - tickOfLastTempoChange, currentTempo, division);
+            double endTime = timeOfLastTempoChange + timeSinceTempoChange;
+            notes.emplace_back(voice, channel, pitch, noteOnVelocity, startTime, endTime);
+            printf("matched note with tempo %u : startTick: %u, endTick: %u, start: %f, end: %f, voice: %d, pitch: %d \n", currentTempo, noteOnEvent.absoluteTick, event.absoluteTick, startTime, endTime, voice, pitch);
         }
         else
         {
             printf("unmatched event: \n");
-            printf("dt: %d, command: %02X, voice: %02X, pitch: %02X \n", event.dt, command, voice, pitch);
+            printf("dt: %d, command: %02X, voice: %02X, pitch: %02X \n", event.absoluteTick, command, voice, pitch);
         }
 
     }
@@ -252,10 +288,11 @@ std::vector<Note> buildNoteList(std::vector<MidiEvent> events, uint32_t tempo, u
     if (!unmatchedEvents.empty())
     {
         printf("unmatched note ons: %zu\n", unmatchedEvents.size());
-        for (auto& [key, e] : unmatchedEvents)
-            printf("  voice=%d pitch=%d tick=%u\n", key.first, key.second, e.dt);
+        for (auto& [key, pair] : unmatchedEvents)
+            printf("  voice=%d pitch=%d tick=%u\n", key.first, key.second, pair.first.absoluteTick);
     }
 
+    // sort notes chronologically
     std::sort(notes.begin(), notes.end(), [](const Note& a, const Note& b)
     {
         return a.startTime < b.startTime;
@@ -283,10 +320,10 @@ const Color VOICE_COLORS[16] = {
     {255, 215, 0,   255},   // 15 gold
 };
 
-float computeOpacity(const Note& note, float currentTime)
+float computeOpacity(const Note& note, double currentTime)
 {
-    float duration  = note.endTime - note.startTime;
-    float age       = currentTime - note.startTime;
+    float duration  = static_cast<float>(note.endTime - note.startTime);
+    float age       = static_cast<float>(currentTime - note.startTime);
     float position  = age / duration;   // 0.0 → 1.0
 
     const float FADE_IN  = 0.5f;        // first 10% of note
@@ -300,7 +337,7 @@ float computeOpacity(const Note& note, float currentTime)
         return 1.0f;                                    // full opacity
 }
 
-void drawNote(Vector2 center, Note note, float currentTime, float gap)
+void drawNote(Vector2 center, Note note, double currentTime, float gap)
 {
     uint8_t numPitches = 12;
     float angleOffset = -90.0f;
@@ -369,20 +406,21 @@ int main(int argc, char* argv[])
 
     std::vector<MidiEvent> events;
 
-    uint32_t tempo = 500000;
+    std::vector<std::pair<uint32_t, uint32_t>> tempoHistory;
+    // uint32_t tempo = 500000;
 
     // READ TRACKS
     for (uint16_t trackIndex = 0; trackIndex < track_count; trackIndex++)
     {
-        printf("Track %d", trackIndex);
+        printf("Track %d\n", trackIndex);
         // printf("expecting MTrk at pos %zu: %02X %02X %02X %02X\n",
         //     bufferPointer,
         //     buffer[bufferPointer],   buffer[bufferPointer+1],
         //     buffer[bufferPointer+2], buffer[bufferPointer+3]);
-        readMidiTrack(buffer, bufferPointer, events, trackIndex, format, tempo);
+        readMidiTrack(buffer, bufferPointer, events, trackIndex, format, tempoHistory);
         printf("bufferPointer=%zu\n", bufferPointer);
-        // for (MidiEvent event : events)
-        //     printf("dt: %u, status: %02X, data1: %02X, data2: %u, voice: %u\n", event.dt, event.status, event.data1, event.data2, event.voice);
+        for (MidiEvent event : events)
+            printf("dt: %u, status: %02X, data1: %02X, data2: %u, voice: %u\n", event.absoluteTick, event.status, event.data1, event.data2, event.voice);
     }
 
     // printf("tempo read: %u", tempo);
@@ -390,22 +428,31 @@ int main(int argc, char* argv[])
     // sort events vector
     std::sort(events.begin(), events.end(), [](const MidiEvent& a, const MidiEvent& b)
     {
-        if (a.dt != b.dt) return a.dt < b.dt;
+        if (a.absoluteTick != b.absoluteTick) return a.absoluteTick < b.absoluteTick;
 
         // same tick: Note Offs (0x80) before Note Ons (0x90)
         // ensures reset Note Offs are processed when pending is empty
         // so they become unmatched rather than consuming genuine Note Ons
         uint8_t commandA = a.status & 0xF0;
         uint8_t commandB = b.status & 0xF0;
-        return commandA < commandB;  // 0x80 < 0x90 ✓
+        return commandA < commandB;  // 0x80 < 0x90
     });
 
-    std::vector<Note> notes = buildNoteList(events, tempo, division);
+    std::sort(tempoHistory.begin(), tempoHistory.end(),
+    [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
 
-    // for (Note note : notes)
-    // {
-    //     printf("start: %f, end: %f, voice: %d, pitch: %d \n", note.startTime, note.endTime, note.voice, note.pitch);
-    // }
+    printf("tempoHistory:\n");
+    for (std::pair<uint32_t, uint32_t> pair: tempoHistory)
+        printf("absoluteTick: %u, tempo: %u \n", pair.first, pair.second);
+
+    std::vector<Note> notes = buildNoteList(events, tempoHistory, division);
+
+    for (Note note : notes)
+    {
+        printf("start: %f, end: %f, voice: %d, pitch: %d \n", note.startTime, note.endTime, note.voice, note.pitch);
+    }
 
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "synesthesia");
 
@@ -413,14 +460,17 @@ int main(int argc, char* argv[])
 
     Vector2 center = {WINDOW_WIDTH / 2, WINDOW_HEIGHT / 2};
     
-    std::multimap<float, Note> activeNotes;
+    std::multimap<double, Note> activeNotes;
     uint32_t noteIndex = 0;
-    float timer = 0.0f;
+    // float timer = 0.0f;
+    double playbackStartTime = GetTime();
+
 
     while (!WindowShouldClose())
     {        
-        float dt = GetFrameTime();
-        timer += dt;
+        // float dt = GetFrameTime();
+        // timer += dt;
+        double timer = GetTime() - playbackStartTime;
 
         BeginDrawing();
 
@@ -443,15 +493,15 @@ int main(int argc, char* argv[])
         }
 
         // draw active notes
-        printf("drawing notes at %f\n", timer);
+        // printf("drawing notes at %f\n", timer);
         for (const auto& entry : activeNotes)
         {
             drawNote(center, entry.second, timer, 4.0f);
-            std::cout << "startTime=" << entry.second.startTime
-                << " endTime=" << entry.second.endTime
-                << " voice=" << static_cast<int>(entry.second.voice)
-                << " pitch=" << static_cast<int>(entry.second.pitch)
-                << "\n";
+            // std::cout << "startTime=" << entry.second.startTime
+            //     << " endTime=" << entry.second.endTime
+            //     << " voice=" << static_cast<int>(entry.second.voice)
+            //     << " pitch=" << static_cast<int>(entry.second.pitch)
+            //     << "\n";
         }
         EndDrawing();
     }

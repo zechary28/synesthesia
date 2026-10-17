@@ -1,6 +1,6 @@
 Set-Location $PSScriptRoot
 
-$midiFile = "$PSScriptRoot\assets\midi\wtc1cmi.mid"
+$midiFile = "$PSScriptRoot\assets\midi\Fugue1.mid"
 
 # build
 C:\raylib\w64devkit\bin\make.exe

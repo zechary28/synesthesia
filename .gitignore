@@ -2,6 +2,7 @@
 *.dsym
 synesthesia
 output.txt
+*.mid
 
 *.code-workspace
 .vscode/
